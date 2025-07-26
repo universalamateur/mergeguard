@@ -106,11 +106,14 @@ check-merge-conflict:
 run-tests:
   stage: 🚂 test
   script:
-    - echo "Running tests..."
-    - echo "The project-local ID of the merge request:" $CI_MERGE_REQUEST_IID
-    - echo "The name of the source branch." $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
-    - echo "The name of the target branch." $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
-    - echo "The title of the merge request." $CI_MERGE_REQUEST_TITLE
-    - echo "The ID of the project :" $CI_PROJECT_ID
-    - echo "The root URL for the GitLab v4 API :" $CI_API_V4_URL
-    - echo "A token used to authenticate the request :" $CI_JOB_TOKEN
+    - |
+      echo "--- 🔍 Inspecting CI/CD Variables ---"
+      echo "Project ID:              $CI_PROJECT_ID"
+      echo "Merge Request IID:       $CI_MERGE_REQUEST_IID"
+      echo "Merge Request Title:     '$CI_MERGE_REQUEST_TITLE'"
+      echo "Source Branch:           $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"
+      echo "Target Branch:           $CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+      echo "GitLab API v4 URL:       $CI_API_V4_URL"
+      echo "CI Job Token:            $CI_JOB_TOKEN"
+      echo "------------------------------------"
+
