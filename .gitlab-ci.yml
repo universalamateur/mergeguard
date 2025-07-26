@@ -1,0 +1,116 @@
+#.gitlab-ci.yml
+
+# ==========================================================================
+# 1. WORKFLOW CONTROL
+# ==========================================================================
+# This section defines the global rules for pipeline creation. It's the
+# first thing GitLab evaluates. Its purpose is to ensure pipelines run ONLY
+# for the events we care about, preventing wasteful duplicate pipelines.
+#
+# The logic is as follows:
+# - Rule 1: Always create a pipeline for merge request events.
+# - Rule 2: Always create a pipeline for commits to the default branch (e.g., 'main' or 'master').
+# - Rule 3: Always create a pipeline for tags (for releases).
+# - Rule 4: NEVER create a branch pipeline if a merge request is already open for that branch.
+#   This is the key rule to prevent duplicate pipelines.
+# - Rule 5: A fallback to allow manual pipeline runs from the UI ('web') and for scheduled pipelines.
+#
+# For more details, see: https://docs.gitlab.com/ee/ci/yaml/workflow.html
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_PIPELINE_SOURCE == 'web'
+    - if: $CI_PIPELINE_SOURCE == 'schedule'
+
+# ==========================================================================
+# 2. STAGES
+# ==========================================================================
+# Stages are defined for logical grouping and visualization in the UI.
+# The actual execution order can be determined by the `needs` keyword.
+stages:
+  - ❄️ validate
+  - 🛠 build
+  - 🚂 test
+  - ⚙️ Run
+  - 🚀 staging
+  - 🐍 deploy
+  - 🛑 Stop
+  - 📚 cleanup
+
+# ==========================================================================
+# 3. JOB TEMPLATES & DEFAULTS
+# ==========================================================================
+# Use YAML anchors for reusable configuration blocks to keep the file DRY.
+.default_rules:
+  rules:
+    # Only run jobs on merge requests and the default branch.
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# This job runs first to check for merge conflicts.
+check-merge-conflict:
+  stage: ❄️ validate
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - |
+      echo "Checking merge request!${CI_MERGE_REQUEST_IID} for conflicts..."
+
+      # Set polling parameters
+      POLL_INTERVAL=10
+      MAX_ATTEMPTS=12 # 12 attempts * 10s = 2 minutes timeout
+
+      # Initial API call to trigger a recheck
+      API_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}?with_merge_status_recheck=true"
+
+      for i in $(seq 1 $MAX_ATTEMPTS); do
+        echo "Attempt ${i}/${MAX_ATTEMPTS}: Querying MR status..."
+
+        # Use CI_JOB_TOKEN for authentication
+        RESPONSE=$(curl --silent --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "${API_URL}")
+
+        # Extract the detailed merge status using jq
+        MERGE_STATUS=$(echo "${RESPONSE}" | jq -r '.detailed_merge_status')
+
+        echo "Current merge status: ${MERGE_STATUS}"
+
+        if [ "${MERGE_STATUS}" == "cannot_be_merged" ]; then
+          echo "Error: Merge conflict detected or MR cannot be merged."
+          echo "Aborting pipeline."
+          exit 1
+        elif [ "${MERGE_STATUS}" == "can_be_merged" ]; then
+          echo "Success: No merge conflicts. Proceeding with pipeline."
+          exit 0
+        elif [ "${MERGE_STATUS}" == "checking" ]; then
+          echo "Merge status is being checked. Waiting ${POLL_INTERVAL} seconds..."
+          sleep ${POLL_INTERVAL}
+          # Subsequent calls don't need the recheck parameter
+          API_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}"
+        else
+          echo "Warning: Received an unexpected merge status ('${MERGE_STATUS}'). Assuming it's safe to proceed."
+          exit 0
+        fi
+      done
+
+      echo "Error: Timed out waiting for merge status to resolve. Aborting pipeline."
+      exit 1
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+
+# Example subsequent job that will not run if the above job fails
+run-tests:
+  stage: 🚂 test
+  script:
+    - echo "Running tests..."
+    - echo "The project-local ID of the merge request:" $CI_MERGE_REQUEST_IID
+    - echo "The name of the source branch." $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+    - echo "The name of the target branch." $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+    - echo "The title of the merge request." $CI_MERGE_REQUEST_TITLE
+    - echo "The ID of the project :" $CI_PROJECT_ID
+    - echo "The root URL for the GitLab v4 API :" $CI_API_V4_URL
+    - echo "A token used to authenticate the request :" $CI_JOB_TOKEN
