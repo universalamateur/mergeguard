@@ -16,6 +16,7 @@
 # - Rule 5: A fallback to allow manual pipeline runs from the UI ('web') and for scheduled pipelines.
 #
 # For more details, see: https://docs.gitlab.com/ee/ci/yaml/workflow.html
+#.gitlab-ci.yml
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
@@ -29,8 +30,6 @@ workflow:
 # ==========================================================================
 # 2. STAGES
 # ==========================================================================
-# Stages are defined for logical grouping and visualization in the UI.
-# The actual execution order can be determined by the `needs` keyword.
 stages:
   - ❄️ validate
   - 🛠 build
@@ -44,21 +43,19 @@ stages:
 # ==========================================================================
 # 3. JOB TEMPLATES & DEFAULTS
 # ==========================================================================
-# Use YAML anchors for reusable configuration blocks to keep the file DRY.
 .default_rules:
   rules:
-    # Only run jobs on merge requests and the default branch.
     - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
-# This job runs first to check for merge conflicts.
-# ─────────────────────────────────────────────────────────────
-#  ❄️  Validate – Detect merge conflicts with rich debugging
-# ─────────────────────────────────────────────────────────────
+# ==========================================================================
+# 4. VALIDATION JOBS
+# ==========================================================================
 # Job 1: Polls the GitLab API for a detailed merge status.
 check-merge-status:
   stage: .pre
   image: alpine:latest
+  extends: .default_rules
   before_script:
     - apk add --no-cache curl jq diffutils
   script:
@@ -97,40 +94,45 @@ check-merge-status:
           CURRENT_RESPONSE="${PREVIOUS_RESPONSE}"
         fi
 
-        MERGE_STATUS=$(echo "${CURRENT_RESPONSE}" | jq -r '.detailed_merge_status')
-        echo "🔖 Current detailed_merge_status: ${MERGE_STATUS}"
+        DETAILED_STATUS=$(echo "${CURRENT_RESPONSE}" | jq -r '.detailed_merge_status')
+        echo "🔖 Current detailed_merge_status: ${DETAILED_STATUS}"
 
-        case "${MERGE_STATUS}" in
+        case "${DETAILED_STATUS}" in
           "mergeable")
             echo "✅ [API Check] Success: MR is mergeable. Pipeline can proceed."
             exit 0
             ;;
           "conflict" | "need_rebase")
-            echo "❌ [API Check] Fatal Error: MR has a hard conflict. To fix, please '${MERGE_STATUS}' the source branch."
+            echo "❌ [API Check] Fatal Error: MR has a hard conflict. To fix, please '${DETAILED_STATUS}' the source branch."
             exit 1
             ;;
           "discussions_not_resolved" | "not_approved" | "requested_changes" | "merge_request_blocked" | "not_open" | "security_policy_violations" | "jira_association_missing" | "locked_paths" | "locked_lfs_files" | "title_regex" | "commits_status")
-            echo "❌ [API Check] Policy Error: MR is blocked by a project policy: '${MERGE_STATUS}'. Please resolve the issue in the MR view."
+            echo "❌ [API Check] Policy Error: MR is blocked by a project policy: '${DETAILED_STATUS}'. Please resolve the issue in the MR view."
             exit 1
             ;;
-          "draft_status")
-            echo "⏳ [API Check] MR is a Draft. This status is ignored. Continuing to poll for other changes..."
+          "draft_status" | "ci_still_running")
+            SIMPLE_STATUS=$(echo "${CURRENT_RESPONSE}" | jq -r '.merge_status')
+            if [ "${SIMPLE_STATUS}" == "can_be_merged" ]; then
+              echo "✅ [API Check] Success: Status is '${DETAILED_STATUS}', but MR is otherwise mergeable. Continuing."
+              exit 0
+            else
+              echo "⏳ [API Check] Status is '${DETAILED_STATUS}' and not yet mergeable. Continuing to poll..."
+            fi
             ;;
           *) # All other statuses are asynchronous/transitional
-            echo "⏳ [API Check] Status is '${MERGE_STATUS}'. This is a transitional state. Waiting for next poll..."
+            echo "⏳ [API Check] Status is '${DETAILED_STATUS}'. This is a transitional state. Waiting for next poll..."
             ;;
         esac
       done
 
       echo "⏰ [API Check] Error: Timed out waiting for a terminal merge status."
       exit 1
-  rules:
-    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
 
 # Job 2: Uses Git directly to check for merge conflicts.
 check-merge-conflict-git:
   stage: .pre
   image: alpine:latest
+  extends: .default_rules
   before_script:
     - apk add --no-cache git
   script:
@@ -138,26 +140,21 @@ check-merge-conflict-git:
       set -euo pipefail
       echo "🔍 [Git Check] Performing a local merge test..."
       
-      # Configure git user, needed for merge command
       git config --global user.name "GitLab CI"
       git config --global user.email "gitlab-ci@example.com"
       
       echo "Fetching target branch '${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}'..."
       git fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
       
-      # The current checkout is already on the MR's source branch SHA
       echo "Attempting to merge target into source branch locally..."
-      
-      # The merge command will fail (non-zero exit) if there are conflicts, failing the job.
       git merge --no-commit --no-ff "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
       
       echo "✅ [Git Check] Success: No git conflicts detected. The branches can be merged."
-  rules:
-    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
-    
+      
 # Example subsequent job that will not run if the above job fails
 run-tests:
   stage: 🚂 test
+  extends: .default_rules # Apply the default rules here as well
   script:
     - |
       echo "--- 🔍 Inspecting CI/CD Variables ---"
@@ -167,6 +164,5 @@ run-tests:
       echo "Source Branch:           $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"
       echo "Target Branch:           $CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
       echo "GitLab API v4 URL:       $CI_API_V4_URL"
-      echo "CI Job Token:            $CI_JOB_TOKEN"
+      echo "CI Job Token:            Is a secret"
       echo "------------------------------------"
-
