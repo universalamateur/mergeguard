@@ -57,7 +57,7 @@ stages:
 # ─────────────────────────────────────────────────────────────
 # Job 1: Polls the GitLab API for a detailed merge status.
 check-merge-status:
-  stage: ❄️ validate
+  stage: .pre
   image: alpine:latest
   before_script:
     - apk add --no-cache curl jq diffutils
@@ -129,6 +129,7 @@ check-merge-status:
 
 # Job 2: Uses Git directly to check for merge conflicts.
 check-merge-conflict-git:
+  stage: .pre
   image: alpine:latest
   before_script:
     - apk add --no-cache git
@@ -153,6 +154,7 @@ check-merge-conflict-git:
       echo "✅ [Git Check] Success: No git conflicts detected. The branches can be merged."
   rules:
     - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+    
 # Example subsequent job that will not run if the above job fails
 run-tests:
   stage: 🚂 test
