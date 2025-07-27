@@ -127,6 +127,8 @@ check-merge-status:
 
       echo "⏰ [API Check] Error: Timed out waiting for a terminal merge status."
       exit 1
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
 
 # Job 2: Uses Git directly to check for merge conflicts.
 check-merge-conflict-git:
@@ -150,6 +152,8 @@ check-merge-conflict-git:
       git merge --no-commit --no-ff "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
       
       echo "✅ [Git Check] Success: No git conflicts detected. The branches can be merged."
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
       
 # Example subsequent job that will not run if the above job fails
 run-tests:
