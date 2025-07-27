@@ -129,8 +129,9 @@ check-merge-status:
 
 # Job 2: Uses Git directly to check for merge conflicts.
 check-merge-conflict-git:
-  stage: ❄️ validate
-  image: alpine/git:v2.36.1 # A lightweight image with Git
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache git
   script:
     - |
       set -euo pipefail
