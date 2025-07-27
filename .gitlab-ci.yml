@@ -110,13 +110,13 @@ check-merge-status:
             echo "❌ [API Check] Policy Error: MR is blocked by a project policy: '${DETAILED_STATUS}'. Please resolve the issue in the MR view."
             exit 1
             ;;
-          "draft_status")
+          "draft_status" | "ci_still_running")
             SIMPLE_STATUS=$(echo "${CURRENT_RESPONSE}" | jq -r '.merge_status')
             if [ "${SIMPLE_STATUS}" == "can_be_merged" ]; then
-              echo "✅ [API Check] Success: MR is a draft, but is otherwise mergeable. Allowing pipeline to continue."
+              echo "✅ [API Check] Success: Status is '${DETAILED_STATUS}', but MR is otherwise mergeable. Continuing."
               exit 0
             else
-              echo "⏳ [API Check] MR is a Draft and not yet mergeable for other reasons. Continuing to poll..."
+              echo "⏳ [API Check] Status is '${DETAILED_STATUS}' and not yet mergeable. Continuing to poll..."
             fi
             ;;
           *) # All other statuses are asynchronous/transitional
