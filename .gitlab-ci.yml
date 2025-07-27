@@ -52,55 +52,95 @@ stages:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 # This job runs first to check for merge conflicts.
+# ─────────────────────────────────────────────────────────────
+#  ❄️  Validate – Detect merge conflicts with rich debugging
+# ─────────────────────────────────────────────────────────────
 check-merge-conflict:
   stage: ❄️ validate
   image: alpine:latest
+  # Run only for merge‑request pipelines
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+  # Adjustable polling knobs
+  variables:
+    POLL_INTERVAL: "5"   # seconds between polls
+    MAX_ATTEMPTS: "24"   # 24 × 5 s ≈ 2 min total
   before_script:
-    - apk add --no-cache curl jq
+    # ‘diffutils’ adds the real GNU diff (busybox’s diff is limited)
+    - apk add --no-cache curl jq diffutils
   script:
     - |
-      echo "Checking merge request!${CI_MERGE_REQUEST_IID} for conflicts..."
+      set -euo pipefail                              # safer bash
+      echo "🔍 Checking MR !${CI_MERGE_REQUEST_IID} for conflicts…"
 
-      # Set polling parameters
-      POLL_INTERVAL=10
-      MAX_ATTEMPTS=12 # 12 attempts * 10s = 2 minutes timeout
+      BASE_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}"
+      QUERY="?with_merge_status_recheck=true"        # only appended to the very first call
 
-      # Initial API call to trigger a recheck
-      API_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}?with_merge_status_recheck=true"
+      mkdir -p responses
 
-      for i in $(seq 1 $MAX_ATTEMPTS); do
-        echo "Attempt ${i}/${MAX_ATTEMPTS}: Querying MR status..."
+      for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
+        URL="${BASE_URL}${QUERY}"
+        printf "\n──────────────── Attempt %s/%s ────────────────\n" "$attempt" "$MAX_ATTEMPTS"
+        echo "📨 Request: GET ${URL}"
 
-        # Use CI_JOB_TOKEN for authentication
-        RESPONSE=$(curl --silent --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "${API_URL}")
+        # Do the request, saving headers and body separately
+        HEADER_FILE="responses/headers_${attempt}.txt"
+        BODY_FILE="responses/body_${attempt}.json"
 
-        # Extract the detailed merge status using jq
-        MERGE_STATUS=$(echo "${RESPONSE}" | jq -r '.detailed_merge_status')
+        # --fail: non‑2xx ⇒ non‑zero exit; -D: save headers; -o: save body; -w: HTTP code
+        HTTP_CODE=$(curl --fail --silent --show-error --location \
+                         -H "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+                         -D "${HEADER_FILE}" -o "${BODY_FILE}" \
+                         -w '%{http_code}' "${URL}" )
+        CURL_CODE=$?
 
-        echo "Current merge status: ${MERGE_STATUS}"
+        echo "🌐 HTTP status: ${HTTP_CODE} | curl exit code: ${CURL_CODE}"
+        echo "📥 Response headers:"
+        cat "${HEADER_FILE}"
+        echo "📦 Response body (pretty‑printed):"
+        jq . < "${BODY_FILE}"
 
-        if [ "${MERGE_STATUS}" == "cannot_be_merged" ]; then
-          echo "Error: Merge conflict detected or MR cannot be merged."
-          echo "Aborting pipeline."
-          exit 1
-        elif [ "${MERGE_STATUS}" == "can_be_merged" ]; then
-          echo "Success: No merge conflicts. Proceeding with pipeline."
-          exit 0
-        elif [ "${MERGE_STATUS}" == "checking" ]; then
-          echo "Merge status is being checked. Waiting ${POLL_INTERVAL} seconds..."
-          sleep ${POLL_INTERVAL}
-          # Subsequent calls don't need the recheck parameter
-          API_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}"
-        else
-          echo "Warning: Received an unexpected merge status ('${MERGE_STATUS}'). Assuming it's safe to proceed."
-          exit 0
+        # Diff against the previous response, if any
+        if [ "$attempt" -gt 1 ]; then
+          echo "🔀 Diff vs previous response:"
+          diff -u "responses/body_$((attempt-1)).json" "${BODY_FILE}" || true
         fi
+
+        # Extract and act on merge status
+        MERGE_STATUS=$(jq -r '.detailed_merge_status' < "${BODY_FILE}")
+        echo "🔖 Parsed merge status: ${MERGE_STATUS}"
+
+        case "${MERGE_STATUS}" in
+          can_be_merged)
+            echo "✅  No merge conflicts. Proceeding with pipeline."
+            exit 0
+            ;;
+          cannot_be_merged)
+            echo "❌  Merge conflict detected. Aborting pipeline."
+            exit 1
+            ;;
+          checking)
+            echo "⏳  GitLab is still checking… sleeping ${POLL_INTERVAL}s."
+            sleep "${POLL_INTERVAL}"
+            QUERY=""                      # subsequent calls drop the recheck flag
+            ;;
+          *)
+            echo "⚠️  Unexpected status '${MERGE_STATUS}'. Assuming safe and continuing."
+            exit 0
+            ;;
+        esac
       done
 
-      echo "Error: Timed out waiting for merge status to resolve. Aborting pipeline."
+      echo "⏰  Timeout after $((POLL_INTERVAL * MAX_ATTEMPTS))s without a final answer."
       exit 1
-  rules:
-    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+
+  # Keep every request/response for later inspection
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - responses/
 
 # Example subsequent job that will not run if the above job fails
 run-tests:
