@@ -51,3 +51,4 @@ git merge --no-commit --no-ff "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
 
 ## Experiment Setup
 
+Quick commit to check the changes
