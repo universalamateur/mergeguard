@@ -1,5 +1,3 @@
-#.gitlab-ci.yml
-
 # ==========================================================================
 # 1. WORKFLOW CONTROL
 # ==========================================================================
@@ -31,31 +29,18 @@ workflow:
 # 2. STAGES
 # ==========================================================================
 stages:
-  - ❄️ validate
-  - 🛠 build
   - 🚂 test
-  - ⚙️ Run
-  - 🚀 staging
-  - 🐍 deploy
-  - 🛑 Stop
-  - 📚 cleanup
 
 # ==========================================================================
-# 3. JOB TEMPLATES & DEFAULTS
-# ==========================================================================
-.default_rules:
-  rules:
-    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-
-# ==========================================================================
-# 4. VALIDATION JOBS
+# 3. VALIDATION JOBS
 # ==========================================================================
 # Job 1: Polls the GitLab API for a detailed merge status.
 check-merge-status:
   stage: .pre
   image: alpine:latest
-  extends: .default_rules
+  variables:
+    # We do not want to clone the repo and use only the MR Api
+    GIT_STRATEGY: none
   before_script:
     - apk add --no-cache curl jq diffutils
   script:
@@ -65,7 +50,8 @@ check-merge-status:
 
       # --- Configuration ---
       POLL_INTERVAL=10
-      MAX_ATTEMPTS=18 # 18 attempts * 10s = 3 minutes timeout
+      TIMEOUT=180
+      MAX_ATTEMPTS=$(( ${TIMEOUT} / ${POLL_INTERVAL} ))
       API_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}"
       
       # --- Initial API Call ---
@@ -79,37 +65,37 @@ check-merge-status:
       
       # --- Polling Loop ---
       for i in $(seq 1 $MAX_ATTEMPTS); do
-        if [ $i -gt 1 ]; then
+      if [ $i -gt 1 ]; then
           sleep ${POLL_INTERVAL}
           echo -e "\nAttempt ${i}/${MAX_ATTEMPTS}: Re-querying MR status..."
           CURRENT_RESPONSE=$(curl --silent --show-error --fail \
-            -H "JOB-TOKEN: ${CI_JOB_TOKEN}" "${API_URL}" | jq --sort-keys .)
+          -H "JOB-TOKEN: ${CI_JOB_TOKEN}" "${API_URL}" | jq --sort-keys .)
           
           echo "🔄 Diffs from previous state:"
           diff -u <(echo "${PREVIOUS_RESPONSE}") <(echo "${CURRENT_RESPONSE}") || true
           
           PREVIOUS_RESPONSE="${CURRENT_RESPONSE}"
-        else
+      else
           echo -e "\nAttempt 1/${MAX_ATTEMPTS}: Analyzing initial MR status..."
           CURRENT_RESPONSE="${PREVIOUS_RESPONSE}"
-        fi
+      fi
 
-        DETAILED_STATUS=$(echo "${CURRENT_RESPONSE}" | jq -r '.detailed_merge_status')
-        echo "🔖 Current detailed_merge_status: ${DETAILED_STATUS}"
+      DETAILED_STATUS=$(echo "${CURRENT_RESPONSE}" | jq -r '.detailed_merge_status')
+      echo "🔖 Current detailed_merge_status: ${DETAILED_STATUS}"
 
-        case "${DETAILED_STATUS}" in
+      case "${DETAILED_STATUS}" in
           "mergeable")
-            echo "✅ [API Check] Success: MR is mergeable. Pipeline can proceed."
-            exit 0
-            ;;
+          echo "✅ [API Check] Success: MR is mergeable. Pipeline can proceed."
+          exit 0
+          ;;
           "conflict" | "need_rebase")
-            echo "❌ [API Check] Fatal Error: MR has a hard conflict. To fix, please '${DETAILED_STATUS}' the source branch."
-            exit 1
-            ;;
+          echo "❌ [API Check] Fatal Error: MR has a hard conflict. To fix, please '${DETAILED_STATUS}' the source branch."
+          exit 1
+          ;;
           "discussions_not_resolved" | "not_approved" | "requested_changes" | "merge_request_blocked" | "not_open" | "security_policy_violations" | "jira_association_missing" | "locked_paths" | "locked_lfs_files" | "title_regex" | "commits_status")
-            echo "❌ [API Check] Policy Error: MR is blocked by a project policy: '${DETAILED_STATUS}'. Please resolve the issue in the MR view."
-            exit 1
-            ;;
+          echo "❌ [API Check] Policy Error: MR is blocked by a project policy: '${DETAILED_STATUS}'. Please resolve the issue in the MR view."
+          exit 1
+          ;;
           "draft_status" | "ci_still_running")
             SIMPLE_STATUS=$(echo "${CURRENT_RESPONSE}" | jq -r '.merge_status')
             if [ "${SIMPLE_STATUS}" == "can_be_merged" ]; then
@@ -134,7 +120,6 @@ check-merge-status:
 check-merge-conflict-git:
   stage: .pre
   image: alpine:latest
-  extends: .default_rules
   before_script:
     - apk add --no-cache git
   script:
@@ -154,11 +139,10 @@ check-merge-conflict-git:
       echo "✅ [Git Check] Success: No git conflicts detected. The branches can be merged."
   rules:
     - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
-      
+
 # Example subsequent job that will not run if the above job fails
 run-tests:
   stage: 🚂 test
-  extends: .default_rules # Apply the default rules here as well
   script:
     - |
       echo "--- 🔍 Inspecting CI/CD Variables ---"

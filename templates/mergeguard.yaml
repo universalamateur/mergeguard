@@ -1,0 +1,136 @@
+spec:
+  inputs:
+    stage:
+      description: 'The stage to run the validation jobs in. Default is ".pre"'
+      default: '.pre'
+    mode:
+      description: 'The validation mode to use: api-and-git, api-only, or git-only.'
+      default: 'api-only'
+    allow_draft:
+      description: 'Allow pipeline to proceed if the MR is a draft but otherwise mergeable.'
+      type: 'boolean'
+      default: true
+    timeout:
+      description: 'Timeout in seconds for the API polling job.'
+      type: 'number'
+      default: 180
+
+---
+
+# Job 1: Polls the GitLab API for a detailed merge status.
+check-merge-status:
+  stage: $[[ inputs.stage ]]
+  image: alpine:latest
+  variables:
+    GIT_STRATEGY: none
+  before_script:
+    - apk add --no-cache curl jq diffutils
+  script:
+    - |
+      set -euo pipefail
+      echo "🔍 [API Check] Checking merge request !${CI_MERGE_REQUEST_IID} for mergeability..."
+
+      # --- Configuration ---
+      POLL_INTERVAL=10
+      MAX_ATTEMPTS=$(( $[[ inputs.timeout ]] / ${POLL_INTERVAL} ))
+      API_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}"
+      
+      # --- Initial API Call ---
+      echo "Fetching initial MR data and triggering a status recheck..."
+      PREVIOUS_RESPONSE=$(curl --silent --show-error --fail \
+        -H "JOB-TOKEN: ${CI_JOB_TOKEN}" "${API_URL}?with_merge_status_recheck=true" | jq --sort-keys .)
+
+      echo "------------------- Initial Merge Request State -------------------"
+      echo "${PREVIOUS_RESPONSE}"
+      echo "---------------------------------------------------------------------"
+      
+      # --- Polling Loop ---
+      for i in $(seq 1 $MAX_ATTEMPTS); do
+      if [ $i -gt 1 ]; then
+          sleep ${POLL_INTERVAL}
+          echo -e "\nAttempt ${i}/${MAX_ATTEMPTS}: Re-querying MR status..."
+          CURRENT_RESPONSE=$(curl --silent --show-error --fail \
+          -H "JOB-TOKEN: ${CI_JOB_TOKEN}" "${API_URL}" | jq --sort-keys .)
+          
+          echo "🔄 Diffs from previous state:"
+          diff -u <(echo "${PREVIOUS_RESPONSE}") <(echo "${CURRENT_RESPONSE}") || true
+          
+          PREVIOUS_RESPONSE="${CURRENT_RESPONSE}"
+      else
+          echo -e "\nAttempt 1/${MAX_ATTEMPTS}: Analyzing initial MR status..."
+          CURRENT_RESPONSE="${PREVIOUS_RESPONSE}"
+      fi
+
+      DETAILED_STATUS=$(echo "${CURRENT_RESPONSE}" | jq -r '.detailed_merge_status')
+      echo "🔖 Current detailed_merge_status: ${DETAILED_STATUS}"
+
+      case "${DETAILED_STATUS}" in
+          "mergeable")
+          echo "✅ [API Check] Success: MR is mergeable. Pipeline can proceed."
+          exit 0
+          ;;
+          "conflict" | "need_rebase")
+          echo "❌ [API Check] Fatal Error: MR has a hard conflict. To fix, please '${DETAILED_STATUS}' the source branch."
+          exit 1
+          ;;
+          "discussions_not_resolved" | "not_approved" | "requested_changes" | "merge_request_blocked" | "not_open" | "security_policy_violations" | "jira_association_missing" | "locked_paths" | "locked_lfs_files" | "title_regex" | "commits_status")
+          echo "❌ [API Check] Policy Error: MR is blocked by a project policy: '${DETAILED_STATUS}'. Please resolve the issue in the MR view."
+          exit 1
+          ;;
+          "ci_still_running")
+          SIMPLE_STATUS=$(echo "${CURRENT_RESPONSE}" | jq -r '.merge_status')
+          if [ "${SIMPLE_STATUS}" == "can_be_merged" ]; then
+              echo "✅ [API Check] Success: A CI pipeline is still running, but the MR is otherwise mergeable. Allowing subsequent jobs to proceed."
+              exit 0
+          else
+              echo "⏳ [API Check] A CI pipeline is running and the MR is not yet mergeable for other reasons. Continuing to poll..."
+          fi
+          ;;
+          "draft_status")
+          if [ "$[[ inputs.allow_draft ]]" == "true" ]; then
+              SIMPLE_STATUS=$(echo "${CURRENT_RESPONSE}" | jq -r '.merge_status')
+              if [ "${SIMPLE_STATUS}" == "can_be_merged" ]; then
+              echo "✅ [API Check] Success: MR is a draft, but is otherwise mergeable. Continuing per component input."
+              exit 0
+              else
+              echo "⏳ [API Check] MR is a draft and not yet mergeable for other reasons. Continuing to poll..."
+              fi
+          else
+              echo "❌ [API Check] Policy Error: MR is a draft. This is disallowed by the 'allow_draft: false' component input."
+              exit 1
+          fi
+          ;;
+          *) # All other statuses are asynchronous/transitional
+          echo "⏳ [API Check] Status is '${DETAILED_STATUS}'. This is a transitional state. Waiting for next poll..."
+          ;;
+      esac
+      done
+
+      echo "⏰ [API Check] Error: Timed out waiting for a terminal merge status."
+      exit 1
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event' && ($[[ inputs.mode ]] == 'api-and-git' || $[[ inputs.mode ]] == 'api-only')
+
+# Job 2: Uses Git directly to check for merge conflicts.
+check-merge-conflict-git:
+  stage: $[[ inputs.stage ]]
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache git
+  script:
+    - |
+      set -euo pipefail
+      echo "🔍 [Git Check] Performing a local merge test..."
+      
+      git config --global user.name "GitLab CI"
+      git config --global user.email "gitlab-ci@example.com"
+      
+      echo "Fetching target branch '${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}'..."
+      git fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+      
+      echo "Attempting to merge target into source branch locally..."
+      git merge --no-commit --no-ff "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+      
+      echo "✅ [Git Check] Success: No git conflicts detected. The branches can be merged."
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event' && ($[[ inputs.mode ]] == 'api-and-git' || $[[ inputs.mode ]] == 'git-only')
