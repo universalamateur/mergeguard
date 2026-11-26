@@ -1,5 +1,9 @@
 # MergeGuard
 
+![Project logo](./logo.png)
+
+[Lead repository on GitLab](https://gitlab.com/universalamateur1/mergeguard)
+
 Descriuption: Preventing CI Pipeline Execution for Merge Requests with Conflicts
 
 ## Executive Summary: 
